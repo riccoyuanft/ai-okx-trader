@@ -1,0 +1,22 @@
+# Core
+python-dotenv
+pydantic
+pydantic-settings
+
+# OKX Trading
+python-okx
+
+# AI
+openai
+
+# Scheduling
+APScheduler
+
+# Logging
+loguru
+
+# Redis
+redis
+
+# Utils
+requests
