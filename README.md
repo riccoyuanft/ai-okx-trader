@@ -334,15 +334,8 @@ python scripts/symbol_screener.py
 
 输出 `scripts/symbol_whitelist.csv`，评分 ≥ 80 为优先标的。详见 [标的筛选脚本使用说明](docs/标的筛选脚本使用说明.md)。
 
-## 🐳 Docker 部署
 
-```bash
-cd deployment
-docker-compose up -d
-docker-compose logs -f app
-```
-
-## � 文档
+## 📄 文档
 
 | 文档 | 说明 |
 |------|------|
