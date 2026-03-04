@@ -1,56 +1,20 @@
-# TA-Lib技术指标模块使用说明
+# 技术指标模块使用说明
 
-## 📦 安装教程
+本项目使用 **pandas-ta** 计算所有技术指标（不依赖 TA-Lib C 库）。
 
-### 1. 安装TA-Lib依赖
+## 📦 安装
 
-#### Windows系统
-
-```bash
-# 方法1：使用预编译的whl文件（推荐）
-# 访问 https://www.lfd.uci.edu/~gohlke/pythonlibs/#ta-lib
-# 下载对应Python版本的whl文件，例如：
-# TA_Lib‑0.4.28‑cp311‑cp311‑win_amd64.whl (Python 3.11, 64位)
-
-pip install TA_Lib‑0.4.28‑cp311‑cp311‑win_amd64.whl
-
-# 方法2：使用pip直接安装（可能需要编译环境）
-pip install TA-Lib
-```
-
-#### Linux/macOS系统
+所有依赖已在 `requirements.txt` 中声明，直接安装即可：
 
 ```bash
-# 先安装系统依赖
-# Ubuntu/Debian:
-sudo apt-get install build-essential wget
-wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz
-tar -xzf ta-lib-0.4.0-src.tar.gz
-cd ta-lib/
-./configure --prefix=/usr
-make
-sudo make install
-
-# macOS (使用Homebrew):
-brew install ta-lib
-
-# 然后安装Python包
-pip install TA-Lib
+pip install -r requirements.txt
 ```
 
-### 2. 安装NumPy（如果未安装）
+验证安装：
 
 ```bash
-pip install numpy
+python -c "import pandas_ta; print('pandas-ta OK:', pandas_ta.version)"
 ```
-
-### 3. 验证安装
-
-```bash
-python -c "import talib; print(talib.__version__)"
-```
-
-如果输出版本号（如 `0.4.28`），说明安装成功。
 
 ---
 
@@ -181,19 +145,15 @@ if market_data.get('indicators'):
 编辑 `src/indicators/ta_calculator.py`，在 `_calculate_indicators()` 方法中添加：
 
 ```python
-# 示例：添加KDJ指标
-if len(close) >= 9:
-    k, d = talib.STOCH(
-        high, low, close,
-        fastk_period=9,
-        slowk_period=3,
-        slowd_period=3
-    )
-    indicators["kdj_k"] = self._safe_value(k[-1])
-    indicators["kdj_d"] = self._safe_value(d[-1])
+# 示例：添加 Stochastic KDJ 指标（使用 pandas_ta）
+if len(df) >= 9:
+    stoch = ta.stoch(df['high'], df['low'], df['close'], k=9, d=3)
+    if stoch is not None and not stoch.empty:
+        indicators["kdj_k"] = self._safe_value(stoch.iloc[-1, 0])
+        indicators["kdj_d"] = self._safe_value(stoch.iloc[-1, 1])
 ```
 
-然后在 `_format_indicators()` 中添加格式化逻辑。
+然后在 `src/config/prompts.py` 的 `_format_indicators()` 中添加格式化逻辑。
 
 ---
 
@@ -237,13 +197,13 @@ if len(close) >= 9:
 
 ### 错误处理
 
-如果TA-Lib未安装或计算失败：
+如果 pandas-ta 未安装或计算失败：
 
 ```
-2026-02-06 11:23:45 | ERROR | src.indicators.ta_calculator:calculate_all_indicators:35 - 技术指标计算失败: No module named 'talib'
+2026-02-06 11:23:45 | WARNING | src.indicators.ta_calculator - pandas-ta未安装，技术指标计算功能将不可用
 ```
 
-系统会继续运行，但不会传递指标数据给AI。
+系统会继续运行，但不会传递指标数据给 AI。建议安装 pandas-ta 以获得完整功能。
 
 ---
 
@@ -270,9 +230,9 @@ logs/ai_conversations/ai_conversation_YYYYMMDD_HHMMSS.txt
 
 ## 📞 问题排查
 
-### 问题1：ImportError: No module named 'talib'
+### 问题1：ImportError: No module named 'pandas_ta'
 
-**解决方案**：按照安装教程重新安装TA-Lib
+**解决方案**：运行 `pip install pandas-ta`
 
 ### 问题2：指标值全部为 None/N/A
 
@@ -288,17 +248,3 @@ logs/ai_conversations/ai_conversation_YYYYMMDD_HHMMSS.txt
 
 ---
 
-## ✅ 完成清单
-
-- [x] 创建独立的TA-Lib指标计算工具类
-- [x] 在主循环中集成指标计算逻辑
-- [x] 更新AI提示词以接收指标数据
-- [x] 兼容现有日志系统
-- [x] 处理NaN值和精度控制
-- [x] 输出安装教程和使用说明
-
----
-
-**模块版本**: v1.0.0  
-**最后更新**: 2026-02-06  
-**作者**: AI Trading System

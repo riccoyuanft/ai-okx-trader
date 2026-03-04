@@ -39,7 +39,9 @@ class TradingBot:
         self.lock_timeout_cycles: int = getattr(settings, 'lock_timeout_cycles', 2)
         
         # Redis状态管理（先初始化，后续按标的切换）
-        self.redis_state = RedisStateManager(settings.symbol)
+        # 使用 symbol_pool 第一个标的初始化
+        init_symbol = settings.symbol_pool.split(',')[0].strip() if settings.symbol_pool else "BTC-USDT"
+        self.redis_state = RedisStateManager(init_symbol)
         
         # 动态标的池管理器（使用Redis存储，自动筛选更新）
         self.pool_manager = SymbolPoolManager(redis_client=self.redis_state.client)
@@ -67,10 +69,10 @@ class TradingBot:
         
         # 订单跟踪（完全自己实现止损止盈，不用OKX条件单）
         self.stop_loss_price: Optional[float] = None
-        self.take_profit_prices: list = []  # 多个止盈位，支持分批止盈
-        self.tp_order_ids: list = []  # 预挂的TP限价卖单order_id列表（与take_profit_prices一一对应）
+        self.take_profit_prices: list = []  # 止盈价格列表（单TP全仓出）
+        self.tp_order_ids: list = []  # 预挂的TP限价卖单order_id列表
         self.position_size: Optional[float] = None  # 持仓数量（基础货币，如BTC/SENT/ETH）
-        self.initial_position_size: Optional[float] = None  # 初始持仓数量，用于计算分批比例
+        self.initial_position_size: Optional[float] = None  # 初始持仓数量
         
         # 价格监控线程控制
         self.price_monitor_running = False
@@ -104,8 +106,11 @@ class TradingBot:
     
     @property
     def active_symbol(self) -> str:
-        """当前活跃交易标的：锁定标的 > 默认标的"""
-        return self.locked_symbol if self.locked_symbol else settings.symbol
+        """当前活跃交易标的：锁定标的 > 池中第一个"""
+        if self.locked_symbol:
+            return self.locked_symbol
+        pool = self._get_symbol_pool()
+        return pool[0] if pool else "BTC-USDT"
     
     def _get_symbol_pool(self) -> list:
         """获取标的池列表（优先从动态池管理器读取，降级到settings.py）"""
@@ -117,7 +122,8 @@ class TradingBot:
         pool_str = getattr(settings, 'symbol_pool', '')
         if pool_str:
             return [s.strip() for s in pool_str.split(',') if s.strip()]
-        return [settings.symbol]
+        # 如果 symbol_pool 也为空，返回默认值
+        return ["BTC-USDT"]
     
     def _lock_symbol(self, symbol: str):
         """锁定标的，暂停其他标的分析"""
@@ -406,7 +412,39 @@ class TradingBot:
                         time.sleep(1)
                         continue
                     
-                    # 2. 检查TP限价挂单是否成交（每3秒查一次，减少API调用）
+                    # 2. 自动追踪止损：价格上涨时逐步提高SL锁住利润
+                    if self.stop_loss_price and self.current_position.entry_price:
+                        entry = self.current_position.entry_price
+                        profit_pct = ((current_price - entry) / entry) * 100
+                        
+                        # 阶梯式追踪止损（仅向上移动，永不下调）
+                        new_sl = self.stop_loss_price
+                        if profit_pct >= 1.0:
+                            # 浮盈≥1.0% → SL移至入场价+0.5%
+                            new_sl = max(new_sl, entry * 1.005)
+                        elif profit_pct >= 0.8:
+                            # 浮盈≥0.8% → SL移至入场价+0.3%
+                            new_sl = max(new_sl, entry * 1.003)
+                        elif profit_pct >= 0.5:
+                            # 浮盈≥0.5% → SL移至入场价（保本）
+                            new_sl = max(new_sl, entry)
+                        
+                        if new_sl > self.stop_loss_price:
+                            old_sl = self.stop_loss_price
+                            self.stop_loss_price = new_sl
+                            logger.success(f"📈 追踪止损上移: {old_sl:.6f} -> {new_sl:.6f} (浮盈{profit_pct:.2f}%)")
+                            # 异步保存到Redis（不阻塞监控循环）
+                            try:
+                                self.redis_state.save_position(
+                                    entry_price=entry,
+                                    size_btc=self.position_size,
+                                    stop_loss_price=self.stop_loss_price,
+                                    take_profit_prices=self.take_profit_prices
+                                )
+                            except Exception:
+                                pass
+                    
+                    # 3. 检查TP限价挂单是否成交（每3秒查一次，减少API调用）
                     if not hasattr(self, '_tp_check_counter'):
                         self._tp_check_counter = 0
                     self._tp_check_counter += 1
@@ -469,202 +507,80 @@ class TradingBot:
         except Exception as e:
             logger.error(f"执行止损失败: {e}，保留持仓状态等待重试")
     
-    def _execute_take_profit(self, current_price: float, close_ratio: float = 1.0, tp_index: int = 1, total_tp: int = 1):
-        """执行止盈：支持分批平仓
-        
-        Args:
-            current_price: 当前价格
-            close_ratio: 平仓比例 (0.5=50%, 1.0=100%)
-            tp_index: 当前止盈位序号
-            total_tp: 总止盈位数量
-        """
-        try:
-            base_currency = self.active_symbol.split('-')[0]
-            
-            if close_ratio >= 1.0:
-                # 全部平仓
-                logger.info(f"正在执行止盈(全部平仓) @ ~{current_price}")
-                success = self.okx_client.close_position(self.active_symbol)
-                
-                if success:
-                    logger.success(f"✓ 止盈单已执行(全部平仓)")
-                    
-                    # 记录平仓交易和盈亏
-                    if self.current_trade_id and self.current_position.has_position:
-                        pnl_usdt = (current_price - self.current_position.entry_price) * self.position_size
-                        pnl_pct = (current_price - self.current_position.entry_price) / self.current_position.entry_price * 100
-                        
-                        close_reason = f"tp{tp_index}" if total_tp > 1 else "tp1"
-                        self.redis_state.record_trade_close(
-                            trade_id=self.current_trade_id,
-                            exit_price=current_price,
-                            close_reason=close_reason,
-                            pnl_usdt=pnl_usdt,
-                            pnl_pct=pnl_pct
-                        )
-                        
-                        # 🔴 检查日亏损限额（止盈也需要记录，统计完整日内盈亏）
-                        self._check_daily_loss_limit(pnl_pct)
-                    
-                    self._clear_position_state()
-                else:
-                    logger.error("❌ 止盈单执行失败，保留持仓状态等待重试")
-            else:
-                # 部分平仓
-                close_size = self.position_size * close_ratio
-                logger.info(f"正在执行止盈(部分平仓 {close_ratio*100:.0f}%) @ ~{current_price}, 数量: {close_size:.8f}")
-                
-                order_id = self.okx_client.place_market_order(
-                    symbol=self.active_symbol,
-                    side="sell",
-                    size=close_size
-                )
-                
-                if order_id:
-                    logger.success(f"✓ 止盈单已执行(部分平仓 {close_ratio*100:.0f}%)")
-                    # 更新持仓数量
-                    self.position_size -= close_size
-                    logger.info(f"📝 剩余持仓: {self.position_size:.8f} {base_currency}")
-                    
-                    # 保存更新后的状态
-                    self.redis_state.save_position(
-                        entry_price=self.current_position.entry_price,
-                        size_btc=self.position_size,
-                        stop_loss_price=self.stop_loss_price,
-                        take_profit_prices=self.take_profit_prices
-                    )
-                else:
-                    logger.error("❌ 止盈单执行失败，保留持仓状态等待重试")
-            
-        except Exception as e:
-            logger.error(f"执行止盈失败: {e}，保留持仓状态等待重试")
-    
     def _place_tp_limit_orders(self):
-        """开仓成交后，预挂TP限价卖单到交易所（零滑点止盈）"""
+        """开仓成交后，预挂TP限价卖单到交易所（零滑点止盈，全仓一个TP）"""
         if not self.take_profit_prices or not self.position_size:
             return
         
         self.tp_order_ids = []
-        total_tp = len(self.take_profit_prices)
-        remaining_size = self.position_size
         
-        for i, tp_price in enumerate(self.take_profit_prices):
-            is_last = (i == total_tp - 1)
-            if is_last:
-                sell_size = remaining_size  # 最后一个TP挂剩余全部
-            else:
-                sell_size = self.position_size * 0.5  # 非最后一个TP挂50%
-                remaining_size -= sell_size
-            
-            order_id = self.okx_client.place_limit_order(
-                symbol=self.active_symbol,
-                side="sell",
-                price=tp_price,
-                size=sell_size
-            )
-            
-            if order_id:
-                self.tp_order_ids.append(order_id)
-                logger.success(f"✓ TP{i+1}限价卖单已挂出: {sell_size:.8f} @ {tp_price}, ordId={order_id}")
-            else:
-                self.tp_order_ids.append(None)
-                logger.error(f"❌ TP{i+1}限价卖单挂出失败: {sell_size:.8f} @ {tp_price}")
+        # 只取第一个TP价格，全仓挂单
+        tp_price = self.take_profit_prices[0]
+        sell_size = self.position_size
         
-        valid_count = sum(1 for oid in self.tp_order_ids if oid)
-        logger.info(f"📋 TP限价卖单挂出完成: {valid_count}/{total_tp}个成功")
+        order_id = self.okx_client.place_limit_order(
+            symbol=self.active_symbol,
+            side="sell",
+            price=tp_price,
+            size=sell_size
+        )
+        
+        if order_id:
+            self.tp_order_ids.append(order_id)
+            logger.success(f"✓ TP限价卖单已挂出: {sell_size:.8f} @ {tp_price}, ordId={order_id}")
+        else:
+            self.tp_order_ids.append(None)
+            logger.error(f"❌ TP限价卖单挂出失败: {sell_size:.8f} @ {tp_price}")
     
     def _check_tp_order_fills(self, current_price: float):
-        """检查预挂的TP限价卖单是否已在交易所成交"""
+        """检查预挂的TP限价卖单是否已在交易所成交（单TP全仓模式）"""
         if not self.tp_order_ids:
             return
         
-        for i, order_id in enumerate(self.tp_order_ids):
-            if not order_id:
-                continue
+        order_id = self.tp_order_ids[0] if self.tp_order_ids else None
+        if not order_id:
+            return
+        
+        try:
+            order_status = self.okx_client.get_order_status(self.active_symbol, order_id)
+            if not order_status:
+                return
             
-            try:
-                order_status = self.okx_client.get_order_status(self.active_symbol, order_id)
-                if not order_status:
-                    continue
+            if order_status['state'] == 'filled':
+                fill_price = order_status['avgPx']
+                fill_size = order_status['accFillSz']
                 
-                if order_status['state'] == 'filled':
-                    fill_price = order_status['avgPx']
-                    fill_size = order_status['accFillSz']
-                    tp_price = self.take_profit_prices[i] if i < len(self.take_profit_prices) else fill_price
-                    tp_label = i + 1
+                logger.success(f"🎯 TP限价卖单已成交! 成交价: {fill_price}, 数量: {fill_size}")
+                
+                # 发送止盈通知
+                entry_price = self.current_position.entry_price if self.current_position.entry_price else fill_price
+                pnl_pct = ((fill_price - entry_price) / entry_price) * 100 if entry_price else 0
+                self.notifier.notify_take_profit(
+                    symbol=self.active_symbol,
+                    price=fill_price,
+                    entry_price=entry_price,
+                    pnl_pct=pnl_pct
+                )
+                
+                # 记录平仓交易和盈亏
+                if self.current_trade_id and self.current_position.has_position:
+                    pnl_usdt = (fill_price - self.current_position.entry_price) * fill_size
+                    total_pnl_pct = ((fill_price - self.current_position.entry_price) / self.current_position.entry_price) * 100
                     
-                    logger.success(f"🎯 TP{tp_label}限价卖单已成交! 成交价: {fill_price}, 数量: {fill_size}")
-                    
-                    # 发送止盈通知
-                    entry_price = self.current_position.entry_price if self.current_position.entry_price else tp_price
-                    pnl_pct = ((fill_price - entry_price) / entry_price) * 100 if entry_price else 0
-                    self.notifier.notify_take_profit(
-                        symbol=self.active_symbol,
-                        price=fill_price,
-                        entry_price=entry_price,
-                        pnl_pct=pnl_pct
+                    self.redis_state.record_trade_close(
+                        trade_id=self.current_trade_id,
+                        exit_price=fill_price,
+                        close_reason="tp",
+                        pnl_usdt=pnl_usdt,
+                        pnl_pct=total_pnl_pct
                     )
-                    
-                    # 🔴 从两个列表中同步移除已成交的TP（保持索引一致）
-                    self.tp_order_ids.pop(i)
-                    if i < len(self.take_profit_prices):
-                        self.take_profit_prices.pop(i)
-                    
-                    # 更新持仓数量
-                    self.position_size -= fill_size
-                    
-                    # 检查是否所有TP都已成交（持仓清零）
-                    remaining_tp_orders = [oid for oid in self.tp_order_ids if oid]
-                    if self.position_size <= 0 or not remaining_tp_orders:
-                        logger.success(f"✓ 所有TP限价卖单已成交，持仓已清空")
-                        
-                        # 记录平仓交易和盈亏
-                        if self.current_trade_id and self.current_position.has_position:
-                            pnl_usdt = (fill_price - self.current_position.entry_price) * fill_size
-                            total_pnl_pct = ((fill_price - self.current_position.entry_price) / self.current_position.entry_price) * 100
-                            
-                            self.redis_state.record_trade_close(
-                                trade_id=self.current_trade_id,
-                                exit_price=fill_price,
-                                close_reason=f"tp{tp_label}",
-                                pnl_usdt=pnl_usdt,
-                                pnl_pct=total_pnl_pct
-                            )
-                            self._check_daily_loss_limit(total_pnl_pct)
-                        
-                        self._clear_position_state()
-                        return
-                    else:
-                        # 部分止盈：更新状态，移动止损至成本价
-                        base_currency = self.active_symbol.split('-')[0]
-                        logger.info(f"📝 部分止盈完成，剩余持仓: {self.position_size:.8f} {base_currency}")
-                        logger.info(f"📋 剩余TP挂单: {len(remaining_tp_orders)}个, 剩余TP价格: {self.take_profit_prices}")
-                        
-                        # 移动止损至成本价（保本）
-                        if self.current_position.entry_price:
-                            old_sl = self.stop_loss_price
-                            self.stop_loss_price = self.current_position.entry_price
-                            logger.success(f"🛡️ 止损已移至成本价: {old_sl} -> {self.stop_loss_price} (保本)")
-                        
-                        # 保存更新后的状态（已移除已成交的TP）
-                        self.redis_state.save_position(
-                            entry_price=self.current_position.entry_price,
-                            size_btc=self.position_size,
-                            stop_loss_price=self.stop_loss_price,
-                            take_profit_prices=self.take_profit_prices
-                        )
-                        self.position_state_manager.save_state(
-                            symbol=self.active_symbol,
-                            entry_price=self.current_position.entry_price,
-                            size_btc=self.position_size,
-                            stop_loss_price=self.stop_loss_price,
-                            take_profit_prices=self.take_profit_prices
-                        )
-                    
-                    break  # 每次只处理一个成交
-                    
-            except Exception as e:
-                logger.warning(f"检查TP订单状态失败: {e}")
+                    self._check_daily_loss_limit(total_pnl_pct)
+                
+                # 全仓已出，清除持仓状态
+                self._clear_position_state()
+                
+        except Exception as e:
+            logger.warning(f"检查TP订单状态失败: {e}")
     
     def _restore_position_state(self):
         """启动时恢复持仓状态（包括止损止盈）"""
@@ -721,21 +637,19 @@ class TradingBot:
                     df_1h = self.ta_calculator.calculate_indicators(klines_1h, "1H")
                     atr_1h = df_1h['atr'].iloc[-1]
                     
-                    # 止损 = 入场价 - 0.35倍ATR（取中间值）
-                    sl_distance = 0.35 * atr_1h
+                    # 止损 = 入场价 - 0.5倍ATR
+                    sl_distance = 0.5 * atr_1h
                     self.stop_loss_price = position.entry_price - sl_distance
                     
-                    # 止盈1 = 入场价 + 1.1倍止损空间
-                    # 止盈2 = 入场价 + 2.0倍止损空间
-                    tp1 = position.entry_price + 1.1 * sl_distance
-                    tp2 = position.entry_price + 2.0 * sl_distance
-                    self.take_profit_prices = [tp1, tp2]
+                    # 单止盈 = 入场价 + 1.5倍止损空间（盈亏比1:1.5）
+                    tp = position.entry_price + 1.5 * sl_distance
+                    self.take_profit_prices = [tp]
                     
                     self.position_size = position.size_usdt / position.entry_price
                     self.initial_position_size = self.position_size
                     
-                    logger.warning(f"🛡️ 自动设置止损止盈: SL={self.stop_loss_price:.6f}, TP1={tp1:.6f}, TP2={tp2:.6f}")
-                    logger.warning(f"📊 基于1H ATR={atr_1h:.6f}, 止损空间={sl_distance:.6f}")
+                    logger.warning(f"🛡️ 自动设置止损止盈: SL={self.stop_loss_price:.6f}, TP={tp:.6f}")
+                    logger.warning(f"📊 基于1H ATR={atr_1h:.6f}, 止损空间={sl_distance:.6f}, 盈亏比1:1.5")
                     
                     # 保存到文件和Redis
                     self.position_state_manager.save_state(
@@ -811,6 +725,31 @@ class TradingBot:
         
         # 平仓后立即触发下一轮筛选
         self._trigger_immediate_cycle()
+    
+    def _get_current_interval(self) -> int:
+        """根据持仓状态返回当前应使用的周期间隔（秒）"""
+        if self.current_position.has_position:
+            return settings.cycle_interval_seconds  # 有持仓：5min
+        return getattr(settings, 'cycle_interval_no_position', 900)  # 无持仓：15min
+    
+    def _run_cycle_and_reschedule(self):
+        """执行交易循环后，根据持仓状态动态调整下一轮间隔"""
+        self.run_cycle()
+        
+        # 检查是否需要切换周期
+        new_interval = self._get_current_interval()
+        if hasattr(self, '_current_interval') and new_interval != self._current_interval:
+            try:
+                self.scheduler.reschedule_job(
+                    'trading_cycle',
+                    trigger='interval',
+                    seconds=new_interval
+                )
+                old_interval = self._current_interval
+                self._current_interval = new_interval
+                logger.info(f"⏱️ 周期切换: {old_interval}s -> {new_interval}s ({'有持仓' if self.current_position.has_position else '无持仓'})")
+            except Exception as e:
+                logger.warning(f"动态调整周期失败: {e}")
     
     def _trigger_immediate_cycle(self):
         """平仓后立即触发下一轮交易循环，不等待定时器"""
@@ -888,8 +827,51 @@ class TradingBot:
         
         return context
     
+    def _quick_check_symbol(self, symbol: str) -> bool:
+        """
+        轻量级技术预筛选（不调用AI），检查1H趋势和15m量能
+        仅通过基础指标快速排除明显不适合的标的，节省AI调用成本
+        
+        Returns:
+            True=通过预筛选，值得让AI深入分析
+        """
+        try:
+            # 获取1H K线（只需最近30根）
+            klines_1h = self.okx_client.get_klines(symbol, "1H", 30)
+            if not klines_1h or len(klines_1h) < 20:
+                return False
+            
+            # 获取15m K线（只需最近20根）
+            klines_15m = self.okx_client.get_klines(symbol, "15m", 20)
+            if not klines_15m or len(klines_15m) < 10:
+                return False
+            
+            # 1H趋势检查：价格不能低于MA20太多（排除明确下跌趋势）
+            closes_1h = [k.close for k in klines_1h]
+            ma20 = sum(closes_1h[-20:]) / 20 if len(closes_1h) >= 20 else None
+            current_price = closes_1h[-1]
+            
+            if ma20 and current_price < ma20 * 0.97:
+                logger.debug(f"  ✗ {symbol} 价格低于1H MA20 3%+，趋势偏空，跳过")
+                return False
+            
+            # 15m量能检查：最近3根15m成交量不能太低
+            recent_vols = [k.volume for k in klines_15m[-3:]]
+            avg_vol = sum([k.volume for k in klines_15m[-10:]]) / 10
+            recent_avg = sum(recent_vols) / 3
+            
+            if avg_vol > 0 and recent_avg / avg_vol < 0.3:
+                logger.debug(f"  ✗ {symbol} 15m近期量能过低(相对值={recent_avg/avg_vol:.2f})，跳过")
+                return False
+            
+            return True
+            
+        except Exception as e:
+            logger.debug(f"  ✗ {symbol} 预筛选异常: {e}")
+            return False
+    
     def _scan_symbol_pool(self):
-        """扫描标的池，寻找满足开仓条件的标的"""
+        """扫描标的池，寻找满足开仓条件的标的（含技术预筛选）"""
         pool = self._get_symbol_pool()
         
         if not pool:
@@ -899,8 +881,25 @@ class TradingBot:
         
         logger.info(f"🔍 标的池筛选开始，共{len(pool)}个标的: {pool}")
         
+        # 第1轮：轻量级技术预筛选（不调用AI，节省成本）
+        candidates = []
         for symbol in pool:
-            logger.info(f"📊 正在分析标的: {symbol}")
+            if self._quick_check_symbol(symbol):
+                candidates.append(symbol)
+            else:
+                logger.info(f"  ⏭️ {symbol} 未通过技术预筛选，跳过AI分析")
+        
+        if not candidates:
+            self.locked_symbol = None
+            self.ai_agent.history = []
+            logger.info(f"� 预筛选完毕：{len(pool)}个标的全部不满足基础条件，继续观望")
+            return
+        
+        logger.info(f"📊 预筛选通过{len(candidates)}/{len(pool)}个标的，开始AI深度分析: {candidates}")
+        
+        # 第2轮：AI深度分析（仅对预筛选通过的标的）
+        for symbol in candidates:
+            logger.info(f"�� 正在AI分析标的: {symbol}")
             
             # 临时切换到当前标的进行分析
             self.locked_symbol = symbol
@@ -953,7 +952,7 @@ class TradingBot:
         # 无标的满足条件，清除临时锁定
         self.locked_symbol = None
         self.ai_agent.history = []
-        logger.info("🔍 标的池筛选完毕，无满足开仓条件的标的，继续观望")
+        logger.info(f"🔍 标的池筛选完毕，AI分析{len(candidates)}个标的均无开仓信号，继续观望")
     
     def run_cycle(self):
         """执行一次交易循环"""
@@ -1582,38 +1581,48 @@ class TradingBot:
             # 启动价格监控线程
             self._start_price_monitor()
             
-            # 🔧 启动时初始化标的池（如果Redis中没有有效池）
-            if not self.pool_manager.get_pool() or self.pool_manager.seconds_since_last_update() > 7200:
-                logger.info("📊 启动时初始化标的池...")
-                self.pool_manager.refresh_pool(force=True)
+            # 🔧 启动时初始化标的池（如果启用了自动筛选）
+            if settings.enable_auto_screening:
+                if not self.pool_manager.get_pool() or self.pool_manager.seconds_since_last_update() > 7200:
+                    logger.info("📊 启动时初始化标的池...")
+                    self.pool_manager.refresh_pool(force=True)
+                else:
+                    last = self.pool_manager.get_last_update_time()
+                    pool = self.pool_manager.get_pool()
+                    logger.info(f"📊 标的池已存在: {pool[:5]}... (上次更新: {last.strftime('%H:%M') if last else 'N/A'})")
             else:
-                last = self.pool_manager.get_last_update_time()
-                pool = self.pool_manager.get_pool()
-                logger.info(f"📊 使用已有标的池: {pool[:5]}... (上次更新: {last})")
+                logger.info("⚠️ 自动筛选已禁用，使用 SYMBOL_POOL 配置")
             
             # 执行首次循环
             logger.info("Running initial cycle...")
             self.run_cycle()
             
             self.scheduler = BlockingScheduler()
+            
+            # 动态周期：有持仓5min，无持仓15min
+            initial_interval = self._get_current_interval()
             self.scheduler.add_job(
-                self.run_cycle,
+                self._run_cycle_and_reschedule,
                 'interval',
-                seconds=settings.cycle_interval_seconds,
+                seconds=initial_interval,
                 id='trading_cycle'
             )
+            self._current_interval = initial_interval
             
-            # 标的池定时刷新（每2小时）
-            self.scheduler.add_job(
-                self._refresh_symbol_pool_job,
-                'interval',
-                seconds=7200,
-                id='pool_refresh',
-                next_run_time=datetime.now() + timedelta(seconds=7200)
-            )
-            logger.info("📊 标的池自动刷新已启用（每2小时）")
+            # 标的池定时刷新（每2小时，仅当启用自动筛选时）
+            if settings.enable_auto_screening:
+                self.scheduler.add_job(
+                    self._refresh_symbol_pool_job,
+                    'interval',
+                    seconds=7200,
+                    id='pool_refresh',
+                    next_run_time=datetime.now() + timedelta(seconds=7200)
+                )
+                logger.info("📊 标的池自动刷新已启用（每2小时）")
+            else:
+                logger.info("⚠️ 标的池自动刷新已禁用，使用静态 SYMBOL_POOL 配置")
             
-            logger.info(f"Scheduler started, running every {settings.cycle_interval_seconds}s")
+            logger.info(f"Scheduler started, interval={initial_interval}s (动态: 有持仓{settings.cycle_interval_seconds}s, 无持仓{settings.cycle_interval_no_position}s)")
             self.scheduler.start()
             
         except KeyboardInterrupt:

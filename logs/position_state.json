@@ -1,0 +1,9 @@
+{
+  "symbol": "HYPE-USDT",
+  "entry_price": 32.675,
+  "size_btc": 76.5715731985922,
+  "stop_loss_price": 32.511624999999995,
+  "take_profit_prices": [
+    32.99
+  ]
+}

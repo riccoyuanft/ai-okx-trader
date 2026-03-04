@@ -48,17 +48,17 @@ class ScreenerConfig:
     # OKX API配置（公开接口，无需密钥）
     OKX_FLAG = "0"  # 0=实盘, 1=模拟盘
     
-    # 活跃度筛选（超短线关注最近1~4小时活跃度，不看24h）
-    MIN_1H_AVG_VOLUME_USDT = 20_000  # 1H平均成交量 ≥ 2万 USDT（超短线4H窗口，降低门槛）
-    ACTIVITY_LOOKBACK_HOURS = 4  # 活跃度评估窗口：最近4根1H K线（约1~4小时）
-    MAX_SPREAD_PCT = 0.20  # 买卖盘口价差 ≤ 0.20%（放宽以适配小市值币）
+    # 活跃度筛选（15m短线关注最近4~8小时活跃度）
+    MIN_1H_AVG_VOLUME_USDT = 50_000  # 1H平均成交量 ≥ 5万 USDT（15m短线需要更好流动性）
+    ACTIVITY_LOOKBACK_HOURS = 8  # 活跃度评估窗口：最近8根1H K线（约8小时）
+    MAX_SPREAD_PCT = 0.15  # 买卖盘口价差 ≤ 0.15%（收紧，15m短线需要低滑点）
     
     # 市值安全（通过成交量和价格间接判断）
     MIN_PRICE_USDT = 0.01  # 最低价格，过滤极低价币
     
-    # 波动率筛选（强化短时间波动要求）
-    MIN_ATR_PCT = 0.8  # 1H ATR ≥ 0.8%（放宽波动门槛，让更多标的进入候选池）
-    MIN_1H_RANGE_PCT = 1.2  # 1H振幅 ≥ 1.2%（降低振幅要求）
+    # 波动率筛选（15m短线需要足够波动覆盖0.8%+利润目标）
+    MIN_ATR_PCT = 1.0  # 1H ATR ≥ 1.0%（需要足够波动覆盖TP 0.8-1.5%）
+    MIN_1H_RANGE_PCT = 1.5  # 1H振幅 ≥ 1.5%（确保有足够价格空间）
     MAX_1H_RANGE_PCT = 15.0  # 1H振幅 ≤ 15%（控制极端波动）
     
     # 价格位置筛选（避免追高接盘）
@@ -70,32 +70,32 @@ class ScreenerConfig:
     TREND_TIMEFRAME = "1H"
     TREND_MA_PERIODS = [5, 10, 20]  # MA5 > MA10 > MA20
     
-    # 择时辅助（5m周期）
-    TIMING_TIMEFRAME = "5m"
+    # 择时辅助（15m周期）
+    TIMING_TIMEFRAME = "15m"
     RSI_MIN = 25
     RSI_MAX = 75
     
     # 结构有效性（至少1个支撑或压力位）
     MIN_SUPPORT_OR_RESISTANCE = 1
     
-    # 评分权重（简化策略：趋势交给AI，筛选器重活跃度/波动/结构）
-    WEIGHT_ACTIVITY = 0.25  # 活跃度（流动性保障）
-    WEIGHT_VOLATILITY = 0.30  # 波动率（覆盖成本+利润的基础）
-    WEIGHT_STRUCTURE = 0.20  # 结构清晰度（支撑/压力位是开仓依据）
-    WEIGHT_TREND = 0.10  # 趋势（软评分，AI自主判断）
+    # 评分权重（15m短线：趋势更重要，需要明确方向）
+    WEIGHT_ACTIVITY = 0.20  # 活跃度（流动性保障）
+    WEIGHT_VOLATILITY = 0.25  # 波动率（覆盖成本+利润的基础）
+    WEIGHT_STRUCTURE = 0.15  # 结构清晰度（支撑/压力位是开仓依据）
+    WEIGHT_TREND = 0.25  # 趋势（15m短线需要更强趋势过滤）
     WEIGHT_POSITION = 0.15  # 价格位置（距支撑位越近越好）
     
     # 风险分级
     SCORE_HIGH = 60  # 优先交易
     SCORE_MID = 40   # 备选（交给AI判断）
     
-    # 标的池大小限制（按评分排序取top N，避免过多标的浪费AI决策时间）
-    MAX_MAIN_POOL_SIZE = 5   # 主池最多5个标的
-    MAX_BACKUP_POOL_SIZE = 3  # 备选池最多3个标的
+    # 标的池大小限制（15m短线扫描间隔15min，可以适当增加池大小）
+    MAX_MAIN_POOL_SIZE = 8   # 主池最多8个标的
+    MAX_BACKUP_POOL_SIZE = 4  # 备选池最多4个标的
     
     # 数据获取
     KLINE_LIMIT_1H = 100  # 获取100根1H K线
-    KLINE_LIMIT_5M = 120  # 获取120根5m K线
+    KLINE_LIMIT_15M = 120  # 获取120根15m K线
     
     # 输出
     OUTPUT_CSV = "symbol_whitelist.csv"
@@ -399,7 +399,7 @@ class SymbolScreener:
             return None, 'liquidity_failed'
         
         # 4. 获取5m K线
-        df_5m = self.fetcher.get_klines(symbol, self.config.TIMING_TIMEFRAME, self.config.KLINE_LIMIT_5M)
+        df_5m = self.fetcher.get_klines(symbol, self.config.TIMING_TIMEFRAME, self.config.KLINE_LIMIT_15M)
         if df_5m is None or len(df_5m) < 50:
             return None, 'liquidity_failed'
         
@@ -504,7 +504,7 @@ class SymbolScreener:
             return None
         
         # 4. 获取5m K线
-        df_5m = self.fetcher.get_klines(symbol, self.config.TIMING_TIMEFRAME, self.config.KLINE_LIMIT_5M)
+        df_5m = self.fetcher.get_klines(symbol, self.config.TIMING_TIMEFRAME, self.config.KLINE_LIMIT_15M)
         if df_5m is None or len(df_5m) < 50:
             return None
         

@@ -1,51 +1,35 @@
 """AI system prompts and templates"""
 
 from src.config.settings import settings
+from src.config.strategy_loader import get_strategy_loader
 
 
 def get_system_prompt(symbol: str = None) -> str:
     """
-    动态生成系统提示词 | 5分钟超短线现货做多策略 | 波段快进快出、严控回撤
-    仅symbol/initial_capital/max_daily_risk_pct从配置读取，其余策略参数全部硬编码
+    动态生成系统提示词，从策略配置文件加载
+    策略通过.env中的STRATEGY_NAME配置切换
+    
+    Args:
+        symbol: 交易标的，如果为None则从配置读取
+    
+    Returns:
+        格式化的系统提示词
     """
+    # 获取策略加载器
+    strategy_loader = get_strategy_loader()
+    
+    # 准备运行时变量
     if symbol is None:
         symbol = getattr(settings, 'symbol', 'BTC-USDT')
     initial_capital = getattr(settings, 'initial_capital', 1000.0)
-    max_daily_risk_pct = getattr(settings, 'max_daily_risk_pct', 3.0)
+    max_daily_risk_pct = getattr(settings, 'max_daily_risk_pct', 8.0)
     
-    return f"""你是经验丰富的加密货币超短线交易员，仅交易{symbol}，管理{initial_capital} USDT资金，核心风格：快进快出、见好就收、灵活应变。
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-核心原则（灵活落地，自主判断）
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-1. 趋势判断：参考1H/5m K线+量能+支撑压力位，自主判断多头环境（无固定MA条件，合理即可）；
-2. 开仓原则：仅在"支撑位附近"或"突破后回踩企稳"开仓，5m量能相对值<0.5或无明显支撑位时强制观望，绝不勉强开仓；
-3. 仓位原则：趋势越强仓位越高（80%~100%），缩量/弱趋势降仓位，绝不重仓；
-4. 止损原则：止损间距参考1H ATR 0.3~0.5倍，必须在最近支撑位下方，单次亏损不超过0.2%，触发立即全平；
-5. 止盈原则：浮盈≥0.3%立即止盈50%，剩余仓位移动止损至成本价；浮盈≥0.5%全部平仓，不纠结分批；
-6. 保本原则：当前浮盈从≥0.5%回落至<0.2%时，主动平仓保本，避免"赚过又亏回去"。
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-刚性约束（必须100%遵守，无灵活空间）
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-1. 交易规则：仅做多、无杠杆、不做空，不跨标的交易；
-2. 成本约束：单次交易综合成本（手续费+滑点）约0.2%，预期盈利需覆盖成本+0.1%以上；
-3. 风控约束：单次仓位80%~100%，连续止损2次冷却60分钟，单日亏损超{max_daily_risk_pct}%停止交易；
-4. 持仓约束：持仓≥15分钟且浮盈≥0.2%必须主动止盈，持仓≥25分钟无论盈亏全部平仓（超短线不扛时间）；
-5. 执行约束：不扛单、不加仓摊薄成本、不追无回踩的高位；
-6. 入场约束：入场价格区间宽度应设为当前价的0.3%~0.5%，确保成交率；
-7. 输出约束：只输出标准JSON，无多余文字、注释、说明。
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-输出格式（严格执行）
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-1. 开多：
-{{"d":"long","s":40,"e":"0.158-0.1582","sl":0.157,"tp":[0.1585,0.159],"r":"5m回踩支撑位+量能正常，成本0.2%，预期盈利0.4%"}}
-2. 观望：
-{{"d":"wait","r":"无明确支撑位/趋势偏弱/量价背离"}}
-3. 平仓：
-{{"d":"close","r":"浮盈0.4%见好就收|持仓超15分钟止盈|保本出场|触发止损|趋势反转"}}
-"""
+    # 使用策略加载器格式化提示词
+    return strategy_loader.format_prompt(
+        symbol=symbol,
+        initial_capital=initial_capital,
+        max_daily_risk_pct=max_daily_risk_pct
+    )
 
 
 # 保留向后兼容的常量
@@ -53,8 +37,8 @@ SYSTEM_PROMPT = get_system_prompt()
 
 
 def format_market_data_message(market_data: dict) -> str:
-    """格式化市场数据，适配5分钟更新频率、1H主周期决策逻辑"""
-    msg = f"""【5分钟更新-实时市场数据】
+    """格式化市场数据，适配15分钟短线决策逻辑"""
+    msg = f"""【实时市场数据】
 最新价格: {market_data['current_price']}
 1小时K线(主趋势周期): {market_data['latest_klines']['1h']}
 15分钟K线(过渡确认): {market_data['latest_klines']['15m']}

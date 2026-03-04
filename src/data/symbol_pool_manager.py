@@ -19,6 +19,15 @@ class SymbolPoolManager:
     - 提供标的池查询、校验、切换接口
     - 紧急更新触发（行情走弱、波动率突变、评分下跌）
     - 最小更新间隔30分钟，避免频繁切换
+    
+    配置关系：
+    - 当 ENABLE_AUTO_SCREENING=true 时：
+      * 每2小时自动运行 symbol_screener.py 筛选全市场
+      * 筛选结果存储在 Redis，覆盖 SYMBOL_POOL 配置
+      * SYMBOL_POOL 仅作为降级方案（筛选失败或 Redis 无数据时使用）
+    - 当 ENABLE_AUTO_SCREENING=false 时：
+      * 不执行自动筛选
+      * 直接使用 SYMBOL_POOL 配置作为标的池
     """
     
     # Redis键名
@@ -323,4 +332,5 @@ class SymbolPoolManager:
         pool_str = getattr(settings, 'symbol_pool', '')
         if pool_str:
             return [s.strip() for s in pool_str.split(',') if s.strip()]
-        return [settings.symbol]
+        # 如果 symbol_pool 为空，返回默认值
+        return ["BTC-USDT"]

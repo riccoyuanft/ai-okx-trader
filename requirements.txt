@@ -15,8 +15,14 @@ APScheduler
 # Logging
 loguru
 
+# Technical Indicators
+pandas
+numpy
+pandas-ta
+
 # Redis
 redis
 
 # Utils
 requests
+PyYAML

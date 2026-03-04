@@ -1,329 +1,373 @@
 # AI OKX Trader
 
-基于 AI 大模型的自动化加密货币交易系统，支持 GPT-4o/通义千问/豆包，专注于现货交易。
+基于 AI 大模型的 OKX 现货自动化交易系统，支持 GPT-4o / 通义千问 / 豆包，只做多、不杠杆。
 
 ## 📋 项目概述
 
-这是一个完全自动化的交易系统，由 AI 大模型担任全职交易员角色，负责：
-- 🤖 **AI 决策**: 自主判断开仓/平仓/观望
-- 📊 **动态仓位**: 0%-100% 灵活调整
-- 🛡️ **智能风控**: 止损止盈、风险限额
-- 🔄 **24/7 运行**: 每 5 分钟一次决策循环
+AI 作为全职交易员，根据 OKX K 线数据和 pandas-ta 技术指标自主决策建仓，系统通过独立的价格监控线程（每秒读取价格）执行止损止盈，并通过钉钉发送实时通知。
 
-## ✨ 核心特性
+**核心特性：**
+- 🤖 **AI 决策**: 开仓 / 平仓 / 观望，自主设定入场价、止损止盈位
+- 📊 **技术指标**: MA / EMA / MACD / RSI / BOLL / ATR（5m、15m、1H 三个周期，基于 pandas-ta）
+- 🔍 **实时价格监控**: 独立线程每秒读取价格，触发止损止盈自动平仓
+- 📈 **追踪止损**: 浮盈到位后自动上移止损，阶梯锁定利润
+- 🔄 **多标的轮动**: 支持标的池，AI 空仓时自动扫描切换最优标的
+- 🎯 **自动筛选标的**: 每 2 小时自动筛选全市场，动态更新标的池（可选）
+- 💾 **状态持久化**: 持仓状态写入 Redis / 本地 JSON，重启自动恢复
+- 🔔 **钉钉通知**: 建仓、止盈、止损、风控触发均有推送
+- ⚙️ **可配置策略系统**: 支持 YAML 策略文件，通过 `.env` 一键切换策略，23 个参数全面可配置
+- 🔒 **风控**: 日亏损限额自动停机、连续亏损降仓
 
-- ✅ 只做现货、只做多、不杠杆
-- ✅ 动态仓位管理 (0%-100%)
-- ✅ 智能止损止盈 (盈亏比 ≥ 1:1.5)
-- ✅ 单日最大风险 3%
-- ✅ 连续亏损自动降仓
-- ✅ 完整的会话历史记忆
-- ✅ 实时监控与告警
+## 🏗️ 系统架构
 
-## 🏗️ 技术架构
-
-### 技术栈（简化版）
-- **语言**: Python 3.11+
-- **AI**: OpenAI GPT-4o / 通义千问 / 豆包大模型
-- **交易所**: OKX (python-okx SDK)
-- **调度**: APScheduler
-- **日志**: loguru
-- **数据库**: 可选 (PostgreSQL + Redis)
-
-### 系统架构
 ```
-main.py (主循环)
-    ├── OKXClient (数据获取 + 交易执行)
-    ├── AIAgent (AI 决策)
-    ├── RiskManager (风控验证)
-    └── Logger (日志记录)
+TradingBot (main.py)
+├── 交易决策循环 (APScheduler, 每5分钟/15分钟)
+│   ├── OKXClient        — K线、持仓、下单、撤单
+│   ├── TACalculator     — pandas-ta 技术指标
+│   ├── AIAgent          — AI 决策 (OpenAI 兼容接口)
+│   ├── RiskManager      — 风控校验
+│   └── SymbolPoolManager — 标的池轮动
+└── 价格监控线程 (每秒)
+    ├── 触发止损 → 撤 TP 挂单 → 市价平仓
+    ├── 追踪止损 → 逐步上移 SL
+    └── 检查 TP 挂单成交状态
 ```
 
-**总代码量: ~500行，简单实用！**
+**技术栈：**
+- Python 3.11+, APScheduler, loguru, pydantic
+- python-okx（OKX 官方 SDK）
+- openai（兼容通义千问/豆包）
+- pandas-ta（技术指标）
+- Redis（可选，状态持久化 + 交易历史）
 
-## 📁 项目结构（简化版）
+## 📁 项目结构
 
 ```
 ai-okx-trader/
 ├── src/
-│   ├── main.py              # 主入口 (~200行)
+│   ├── main.py                   # 主控制器（交易循环 + 价格监控线程）
 │   ├── config/
-│   │   ├── settings.py      # 配置管理
-│   │   └── prompts.py       # AI提示词
+│   │   ├── settings.py           # 配置管理（pydantic）
+│   │   ├── prompts.py            # AI 系统提示词 + 市场数据格式化
+│   │   └── strategy_loader.py    # 策略配置加载器
 │   ├── data/
-│   │   ├── models.py        # 数据模型
-│   │   └── okx_client.py    # OKX客户端 (~250行)
+│   │   ├── models.py             # 数据模型（MarketData / Position / AIDecision）
+│   │   ├── okx_client.py         # OKX API 封装
+│   │   ├── position_state.py     # 持仓状态本地 JSON 持久化
+│   │   ├── redis_state.py        # Redis 状态管理（持仓/历史/开关）
+│   │   └── symbol_pool_manager.py # 标的池动态管理
 │   ├── ai/
-│   │   └── agent.py         # AI决策器 (~100行)
+│   │   └── agent.py              # AI 决策器（历史摘要 + 多提供商）
+│   ├── indicators/
+│   │   └── ta_calculator.py      # pandas-ta 指标计算（MA/EMA/MACD/RSI/BOLL/ATR）
 │   ├── risk/
-│   │   └── manager.py       # 风控模块 (~100行)
+│   │   └── manager.py            # 风控（盈亏比、日限额、连续亏损）
+│   ├── notify/
+│   │   └── dingtalk.py           # 钉钉机器人通知
 │   └── monitor/
-│       └── logger.py        # 日志配置
-├── logs/                    # 日志文件
-├── .env                     # 环境变量
-├── requirements.txt         # 依赖列表
-└── README.md
+│       └── logger.py             # loguru 日志配置
+├── strategies/                   # 策略配置文件目录（YAML格式）
+│   ├── 15m_trend_following.yaml  # 15分钟短线趋势跟随策略（默认）
+│   ├── 5m_scalping.yaml          # 5分钟超短线剥头皮策略
+│   └── 1h_swing.yaml             # 1小时波段交易策略
+├── scripts/
+│   ├── symbol_screener.py        # 标的筛选脚本（基于 1H+5m 趋势评分）
+│   └── set_stop_loss.py          # 手动设置止损止盈工具
+├── tests/                        # 功能测试脚本
+├── docs/                         # 详细功能文档
+├── deployment/                   # Dockerfile + docker-compose + systemd
+├── logs/                         # 运行日志（自动创建）
+├── .env.example                  # 基础配置模板
+├── .env.strategy.example         # 策略参数模板
+└── requirements.txt              # Python 依赖
 ```
 
 ## 🚀 快速开始
 
-### 1. 环境要求
+### 前置要求
 
 - Python 3.11+
-- OKX 账户
-- AI API Key (OpenAI / 通义千问 / 豆包，三选一)
+- OKX 账户（先用**模拟盘**测试，无需真实资金）
+- AI API Key：千问 / OpenAI / 豆包（国内推荐），三选一
 
-**注意**: 数据库和Redis是可选的，不是必须的！
-
-### 1.5 模拟盘 vs 实盘
-
-系统支持两种交易模式:
-
-#### 🧪 模拟盘交易 (推荐新手)
-- 使用虚拟资金,不会有真实损失
-- 需要在OKX模拟盘创建API Key
-- 设置 `OKX_TESTNET=true`
-
-**创建模拟盘API Key**:
-1. 登录欧易账户
-2. 交易 → 模拟交易
-3. 个人中心 → 创建模拟盘APIKey
-4. 复制API Key到 `.env` 文件
-
-#### 💰 实盘交易 (真实资金)
-- 使用真实资金,盈亏真实
-- 需要在OKX实盘创建API Key
-- 设置 `OKX_TESTNET=false`
-- **强烈建议先在模拟盘测试验证策略**
-
-**创建实盘API Key**:
-1. 登录 www.okx.com
-2. 个人中心 → API管理
-3. 创建API Key (权限: 交易)
-4. 复制API Key到 `.env` 文件
-
-### 2. 安装依赖
+### 第一步：安装依赖
 
 ```bash
-# 克隆项目
 git clone <repository-url>
 cd ai-okx-trader
 
-# 创建虚拟环境
-python -m venv venv
-venv\Scripts\activate  # Windows
-# source venv/bin/activate  # Linux/Mac
+python -m venv .venv
+.venv\Scripts\activate        # Windows
+# source .venv/bin/activate   # Linux/Mac
 
-# 安装依赖
 pip install -r requirements.txt
 ```
 
-### 3. 配置环境变量
+> `requirements.txt` 已包含 `pandas-ta`（技术指标库），无需额外安装 TA-Lib C 库。
+
+### 第二步：获取 API Key
+
+**OKX 模拟盘（强烈建议先用）：**
+1. 登录 [OKX](https://www.okx.com) → **交易 → 模拟交易**
+2. 个人中心 → **创建模拟盘 APIKey**，权限选**只读 + 交易**（禁止提现）
+
+**AI API Key（通义千问示例）：**
+1. 登录 [火山引擎](https://console.volcengine.com/home) → 火山方舟 → API Key管理 → 创建
+
+### 第三步：配置
 
 ```bash
-# 复制配置模板
-copy .env.example .env  # Windows
-# cp .env.example .env  # Linux/Mac
-
-# 编辑 .env 文件，填入必填项:
-# - OKX_API_KEY (OKX API密钥)
-# - OKX_SECRET_KEY (OKX密钥)
-# - OKX_PASSPHRASE (OKX口令)
-# - AI_PROVIDER (选择: openai / qwen / doubao)
-# - 对应的 AI API Key (根据选择的provider)
+copy .env.example .env        # Windows
+# cp .env.example .env        # Linux/Mac
 ```
 
-### 4. 运行系统
+编辑 `.env`，**至少填写以下必填项**：
+
+```env
+# OKX API — 模拟盘/实盘各一套，通过 OKX_TESTNET 切换
+OKX_SIMULATED_API_KEY=your_simulated_api_key
+OKX_SIMULATED_SECRET_KEY=your_simulated_secret_key
+OKX_SIMULATED_PASSPHRASE=your_simulated_passphrase
+OKX_TESTNET=true              # true=模拟盘，false=实盘
+
+# AI（三选一）
+AI_PROVIDER=qwen
+QWEN_API_KEY=sk-your_qwen_api_key
+
+# 策略选择（可选：15m_trend_following / 5m_scalping / 1h_swing）
+STRATEGY_NAME=15m_trend_following
+
+# 交易配置
+SYMBOL_POOL=BTC-USDT,ETH-USDT,SOL-USDT
+INITIAL_CAPITAL=1000.0
+```
+
+> 两套 API Key 同时配置好后，切换模式只需改 `OKX_TESTNET` 的值，无需重填密钥。详见 [模拟盘与实盘配置.md](docs/模拟盘与实盘配置.md)。
+
+### 第四步：运行
+
+手动启动：
 
 ```bash
-# 直接运行
 python -m src.main
-
-# 或者
-python src/main.py
 ```
 
-**就这么简单！不需要数据库，不需要Docker！**
+启动后输出示例：
+
+```
+AI OKX Trader Started | Symbol: BTC-USDT | Testnet: True
+✓ 历史K线数据已加载到AI记忆
+🔍 价格监控线程已启动 (自动止损止盈)
+```
+
+之后每 5 分钟（无持仓时 15 分钟）触发一次 AI 决策，按 `Ctrl+C` 安全退出。
+
+### 可选配置
+
+**启用 Redis（推荐，用于持仓恢复和交易历史）：**
+
+```bash
+# Windows: https://github.com/tporadowski/redis/releases
+# Linux: sudo apt-get install redis-server && redis-server
+# Mac: brew install redis && redis-server
+```
+
+```env
+USE_REDIS=true
+REDIS_HOST=localhost
+REDIS_PORT=6379
+```
+
+**启用钉钉通知：**
+
+```env
+DINGTALK_ENABLED=true
+DINGTALK_WEBHOOK=https://oapi.dingtalk.com/robot/send?access_token=YOUR_TOKEN
+DINGTALK_SECRET=YOUR_SECRET
+```
+
+**标的池配置（两种模式）：**
+
+```env
+# 模式1：自动筛选（推荐，默认启用）
+ENABLE_AUTO_SCREENING=true
+SYMBOL_POOL=BTC-USDT,ETH-USDT,SOL-USDT  # 作为降级方案
+
+# 模式2：静态配置
+ENABLE_AUTO_SCREENING=false
+SYMBOL_POOL=BTC-USDT,ETH-USDT,SOL-USDT  # 作为主配置
+```
+
+**自动筛选说明**：
+- 启用后，系统每 2 小时自动运行 `symbol_screener.py` 筛选全市场标的
+- 根据技术指标（1H 趋势 + 5m 时机）自动评分，高评分（≥60）进主池
+- 筛选结果存储在 Redis，**覆盖** `SYMBOL_POOL` 配置
+- `SYMBOL_POOL` 仅作为降级方案（筛选失败或 Redis 无数据时使用）
+
+### 监控文件
+
+| 文件 | 说明 |
+|------|------|
+| `logs/ai_trader.log` | 主运行日志 |
+| `logs/ai_conversations/` | AI 对话详细记录 |
+| `logs/position_state.json` | 当前持仓状态（重启自动恢复） |
+
+### 常见问题
+
+**Q: `sign error` 或 `Invalid API key`**  
+检查密钥是否复制完整，确认 `OKX_TESTNET` 与密钥类型（模拟/实盘）匹配。
+
+**Q: AI 长时间输出 `wait`**  
+正常行为，AI 在等待高概率机会。可降低 `.env` 中 `MIN_RISK_REWARD_RATIO`（如 `1.0`）提高入场频率。
+
+**Q: 重启后止损止盈丢失**  
+启用 Redis 后自动恢复；否则从 `logs/position_state.json` 恢复；两者都无则需运行 `python scripts/set_stop_loss.py` 补设。
+
+**Q: 如何切换到实盘**  
+修改 `OKX_TESTNET=false`，并填写实盘 `OKX_API_KEY/SECRET_KEY/PASSPHRASE`，重启即可。
 
 ## 🤖 AI 模型配置
 
-系统支持三种 AI 模型，根据需求选择：
+系统通过 OpenAI 兼容接口支持三种提供商，三选一即可：
 
-### 1. OpenAI GPT-4o (推荐)
-```bash
-AI_PROVIDER=openai
-OPENAI_API_KEY=your_api_key
-OPENAI_MODEL=gpt-4o
-OPENAI_BASE_URL=https://api.openai.com/v1
-```
+| 提供商 | `AI_PROVIDER` | API Key 配置项 | 推荐模型 |
+|--------|--------------|---------------|---------|
+| OpenAI | `openai` | `OPENAI_API_KEY` | `gpt-4o` |
+| 通义千问 | `qwen` | `QWEN_API_KEY` | `qwen2.5-72b-instruct` |
+| 豆包 | `doubao` | `DOUBAO_API_KEY` | `doubao-seed-1-8-251228` |
 
-### 2. 通义千问
-```bash
-AI_PROVIDER=qwen
-QWEN_API_KEY=your_api_key
-QWEN_MODEL=qwen2.5-72b-instruct
-```
+## ⚙️ 核心配置说明
 
-### 3. 豆包大模型
-```bash
-AI_PROVIDER=doubao
-DOUBAO_API_KEY=your_api_key
-DOUBAO_MODEL=doubao-seed-1-8-251228
-DOUBAO_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
-```
-
-**注意**: 只需配置一个 AI 提供商即可，其他可以留空。
-
-## ⚙️ 配置说明
-
-### 核心配置 (.env)
+### 交易参数 (.env)
 
 | 配置项 | 说明 | 默认值 |
 |--------|------|--------|
-| `SYMBOL` | 交易对 | BTC/USDT |
-| `INITIAL_CAPITAL` | 初始资金 | 1000.0 |
-| `MAX_DAILY_RISK_PCT` | 单日最大风险 | 3.0 |
-| `CYCLE_INTERVAL_SECONDS` | 循环间隔 | 300 (5分钟) |
+| `STRATEGY_NAME` | 策略名称（对应 strategies/ 目录下的 YAML 文件） | `15m_trend_following` |
+| `ENABLE_AUTO_SCREENING` | 是否启用自动筛选标的（每2小时） | `true` |
+| `SYMBOL_POOL` | 标的池（逗号分隔），自动筛选关闭时作为主配置 | 空 |
+| `INITIAL_CAPITAL` | 初始资金（USDT） | `1000.0` |
+| `CYCLE_INTERVAL_SECONDS` | 有持仓时 AI 决策间隔 | `300`（5分钟） |
+| `CYCLE_INTERVAL_NO_POSITION` | 无持仓时标的扫描间隔 | `900`（15分钟） |
+| `MAX_DAILY_RISK_PCT` | 日亏损上限，超过自动停机 | `8.0` |
+| `OKX_TESTNET` | `true`=模拟盘，`false`=实盘 | `false` |
 
-### AI 提示词
+### 策略配置系统
 
-系统提示词位于 `src/config/prompts.py`，定义了 AI 的交易风格和规则。
+系统支持通过 YAML 文件配置策略，内置 3 种策略：
 
-## 📊 数据流程
+| 策略名称 | 文件 | 适用场景 | 周期 | 止盈目标 |
+|---------|------|---------|------|---------|
+| 15分钟短线趋势跟随 | `15m_trend_following.yaml` | 中等波动市场 | 15m | 1.0%-2.0% |
+| 5分钟超短线剥头皮 | `5m_scalping.yaml` | 高频快进快出 | 5m | 0.5%-1.2% |
+| 1小时波段交易 | `1h_swing.yaml` | 趋势明确市场 | 1h | 2.5%-5.0% |
 
-### 输入数据格式
-```json
-{
-  "symbol": "BTC/USDT",
-  "current_price": 42800.0,
-  "latest_klines": {
-    "5m": [timestamp, open, high, low, close, volume],
-    "15m": [...],
-    "1h": [...]
-  },
-  "position": {
-    "has_position": true,
-    "entry_price": 42300.0,
-    "size_usdt": 500.0,
-    "current_pnl_pct": 1.18
-  },
-  "key_levels": {
-    "supports": [42200.0, 41800.0],
-    "resistances": [43500.0, 44200.0]
-  }
-}
+**切换策略**：在 `.env` 中设置 `STRATEGY_NAME` 即可，无需修改代码。
+
+**可配置参数**（23个）：
+- 仓位管理（5个）：最小/最大仓位、强弱趋势仓位等
+- 止损参数（3个）：ATR倍数、最大亏损等
+- 止盈参数（4个）：最小/常规/强趋势止盈、盈亏比等
+- 风控参数（2个）：连续亏损次数、冷却期等
+- 持仓时间（3个）：最小/最大持仓时间、止盈浮盈等
+- 入场参数（2个）：价格区间宽度等
+- 量能参数（2个）：缩量/放量阈值等
+- 成本与盈利（3个）：交易成本、盈利要求等
+
+完整说明见 [策略配置系统使用指南](docs/策略配置系统使用指南.md)。
+
+**自定义策略**：复制现有策略文件，修改参数后保存到 `strategies/` 目录即可使用
+
+## 📊 交易决策流程
+
+```
+每个决策周期
+    ├── 1. 获取最新 K线（5m/15m/1H）
+    ├── 2. pandas-ta 计算技术指标（MA/MACD/RSI/BOLL/ATR）
+    ├── 3. 识别支撑压力位
+    ├── 4. 构建市场数据 → 发送给 AI
+    └── 5. 解析 AI 决策
+            ├── long  → 风控校验 → 限价买单 → 启动价格监控线程
+            ├── close → 撤 TP 挂单 → 市价平仓
+            └── wait  → 无操作
 ```
 
-### AI 输出格式
+**AI 输出格式（JSON）：**
 ```json
-{
-  "d": "long",
-  "s": 50,
-  "e": 42800.0,
-  "sl": 42100.0,
-  "tp": [44000.0, 44900.0],
-  "r": "1h bullish + 5m bounce"
-}
+{"d":"long","s":80,"e":42800.0,"sl":42100.0,"tp":[44000.0,44900.0],"r":"1h bullish + 5m bounce"}
 ```
 
 ## 🛡️ 风控规则
 
-1. **永远不逆势开仓**
-2. **触发止损立即平仓**
-3. **盈亏比至少 1:1.5**
-4. **单日总风险 ≤ 3%**
-5. **连续亏损自动降仓**
-6. **只在高概率位置开仓**
+1. 只做现货、只做多、不杠杆
+2. 触发止损立即市价平仓（价格监控线程每秒执行）
+3. 盈亏比要求 ≥ `MIN_RISK_REWARD_RATIO`（默认1.5）
+4. 日累计亏损 ≥ `MAX_DAILY_RISK_PCT` 时自动停机
+5. 连续亏损 ≥ `MAX_CONSECUTIVE_LOSSES` 次后自动降仓
 
-## 📈 监控指标
+## � 钉钉通知
 
-### 业务指标
-- 总资金余额
-- 当日盈亏
-- 胜率 / 盈亏比
-- 最大回撤
+配置钉钉机器人 Webhook，系统会在以下事件推送消息：
+- 开仓（标的、入场价、止损止盈位）
+- 止盈成交
+- 止损触发
+- 风控停机
 
-### 技术指标
-- API 调用成功率
-- 平均响应时间
-- 异常次数
+```env
+DINGTALK_ENABLED=true
+DINGTALK_WEBHOOK=https://oapi.dingtalk.com/robot/send?access_token=YOUR_TOKEN
+DINGTALK_SECRET=YOUR_SECRET    # 加签密钥（可选）
+```
 
-## 🧪 测试
+## 📋 标的筛选脚本
+
+`scripts/symbol_screener.py` 基于 1H 主周期 + 5m 择时，对所有 OKX 现货标的打分排序：
+
+- 流动性（24h 成交量 ≥ 5亿U、价差 ≤ 0.05%）
+- 波动率（ATR ≥ 3%、日振幅 5%-20%）
+- 趋势（MA5 > MA10 > MA20，MACD 零轴上方）
+- 结构（支撑压力位数量）
 
 ```bash
-# 运行所有测试
-pytest
-
-# 运行特定测试
-pytest tests/test_ai_agent.py
-
-# 生成覆盖率报告
-pytest --cov=src --cov-report=html
+python scripts/symbol_screener.py
 ```
+
+输出 `scripts/symbol_whitelist.csv`，评分 ≥ 80 为优先标的。详见 [标的筛选脚本使用说明](docs/标的筛选脚本使用说明.md)。
 
 ## 🐳 Docker 部署
 
 ```bash
-# 构建并启动所有服务
 cd deployment
 docker-compose up -d
-
-# 查看日志
 docker-compose logs -f app
-
-# 停止服务
-docker-compose down
 ```
 
-## 📝 开发计划
+## � 文档
 
-详见 `docs/简化开发方案.md`
-
-### 开发阶段（简化版）
-- [x] 阶段一: 基础框架搭建
-- [x] 阶段二: OKX客户端封装
-- [x] 阶段三: AI决策模块
-- [x] 阶段四: 风控模块
-- [x] 阶段五: 主控制器
-- [ ] 阶段六: 测试与调优
-- [ ] 阶段七: 模拟盘验证
-- [ ] 阶段八: 实盘部署
-
-**预计总开发时间: 3-4天**
-
-## 💰 成本与收益
-
-### 运行成本
-- **每日**: ~$2.16 (144 次 API 调用)
-- **每月**: ~$64.8
-- **每年**: ~$788
-
-### 预期收益
-- **保守**: 年净赚 1000-2700 USDT
-- **中性**: 年净赚 2700-5200 USDT
-- **乐观**: 年净赚 5200-9200 USDT
+| 文档 | 说明 |
+|------|------|
+| [模拟盘与实盘配置.md](docs/模拟盘与实盘配置.md) | 两套 API Key 配置和切换方法 |
+| [策略配置系统使用指南.md](docs/策略配置系统使用指南.md) | **策略配置系统完整指南**（23个可配置参数、3种内置策略、自定义策略教程） |
+| [策略参数配置说明.md](docs/策略参数配置说明.md) | 16个策略参数详解及调整建议 |
+| [可配置策略系统使用指南.md](docs/可配置策略系统使用指南.md) | 典型场景调参指南 |
+| [TA-Lib指标模块使用说明.md](docs/TA-Lib指标模块使用说明.md) | 技术指标安装和使用说明 |
+| [手动设置止损止盈.md](docs/手动设置止损止盈.md) | 手动买入后补设止损止盈 |
+| [标的筛选脚本使用说明.md](docs/标的筛选脚本使用说明.md) | 标的筛选脚本配置和使用 |
+| [交易记录功能说明.md](docs/交易记录功能说明.md) | Redis 交易历史查询方法 |
 
 ## ⚠️ 风险提示
 
-1. 加密货币交易存在高风险
-2. AI 决策不保证盈利
-3. 建议从小资金开始测试
-4. 定期检查系统运行状态
-5. 做好资金管理和风险控制
+1. 加密货币交易存在高风险，可能损失全部本金
+2. AI 决策不保证盈利，请先在模拟盘充分测试
+3. 建议从小资金开始，逐步验证
+4. 定期检查系统运行日志和持仓状态
 
 ## 🔒 安全建议
 
-- ✅ 使用只读 + 交易权限的 API 密钥（禁止提现）
-- ✅ 不要将 `.env` 文件提交到 Git
-- ✅ 定期轮换 API 密钥
-- ✅ 设置 IP 白名单
-- ✅ 启用双因素认证
-
-## 📚 文档
-
-- [初步方案](docs/初步方案.md) - 原始需求和设计
-- [开发实现方案](docs/开发实现方案.md) - 完整版方案（较复杂）
-- [简化开发方案](docs/简化开发方案.md) - **推荐阅读**，简化实用版
+- ✅ API Key 只开启**交易**权限，**禁止提现**
+- ✅ `.env` 文件已在 `.gitignore` 中排除，切勿手动提交
+- ✅ 设置 OKX API IP 白名单
+- ✅ 定期轮换 API Key
 
 ## 🤝 贡献
 
@@ -332,10 +376,6 @@ docker-compose down
 ## 📄 许可证
 
 MIT License
-
-## 📧 联系方式
-
-如有问题，请提交 Issue 或联系项目维护者。
 
 ---
 
