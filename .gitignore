@@ -38,8 +38,8 @@ ENV/
 *~
 
 # Logs
-# logs/
-# *.log
+logs/
+*.log
 
 # Database
 *.db
