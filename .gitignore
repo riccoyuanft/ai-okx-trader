@@ -63,3 +63,4 @@ backups/
 *.json.bak
 
 *.log
+.windsurfrules
